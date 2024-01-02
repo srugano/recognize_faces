@@ -83,4 +83,4 @@ apiconfig.ini
 *.jpg
 *.jpeg
 *.webp
-
+output/

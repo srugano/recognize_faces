@@ -4,6 +4,9 @@ from collections import Counter
 from pathlib import Path
 import argparse
 import face_recognition
+import os
+import math
+from multiprocessing import Pool
 
 # Define the path for storing face encodings
 DEFAULT_ENCODINGS_PATH = Path("output/encodings.pkl")
@@ -119,6 +122,45 @@ def validate(model: str = "hog"):
             # Call the recognize_faces function on the file
             # 'filepath.absolute()' is used to get the absolute path of the file
             recognize_faces(image_location=str(filepath.absolute()), model=model)
+
+
+def estimate_face_orientation(landmarks):
+    left_eye = landmarks["left_eye"]
+    right_eye = landmarks["right_eye"]
+    left_eye_center = tuple(map(lambda x: int(sum(x) / len(x)), zip(*left_eye)))
+    right_eye_center = tuple(map(lambda x: int(sum(x) / len(x)), zip(*right_eye)))
+
+    dx = right_eye_center[0] - left_eye_center[0]
+    dy = right_eye_center[1] - left_eye_center[1]
+    angle = math.atan2(dy, dx) * 180 / math.pi
+    return angle
+
+
+def process_image(image_path):
+    image = face_recognition.load_image_file(str(image_path))
+    face_landmarks_list = face_recognition.face_landmarks(image)
+
+    for face_landmarks in face_landmarks_list:
+        angle = estimate_face_orientation(face_landmarks)
+        if not -30 <= angle <= 30:
+            return image_path
+    return None
+
+
+def find_non_front_facing_images(folder_path):
+    image_paths = list(Path(folder_path).glob("*.jpg"))
+
+    with Pool() as pool:
+        results = pool.map(process_image, image_paths)
+
+    non_front_facing = [result for result in results if result is not None]
+    return non_front_facing
+
+
+# Usage
+folder = "path/to/your/folder"  # Replace with your folder path
+non_front_facing_images = find_non_front_facing_images(folder)
+print("Non front-facing images:", non_front_facing_images)
 
 
 if __name__ == "__main__":
