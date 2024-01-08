@@ -1,12 +1,16 @@
 # Import necessary libraries
-import pickle
-from collections import Counter
-from pathlib import Path
 import argparse
-import face_recognition
-import os
 import math
-from multiprocessing import Pool
+import os
+import pickle
+import time
+from collections import Counter
+from multiprocessing import Pool, cpu_count
+from pathlib import Path
+import numpy as np
+
+import cv2
+import face_recognition
 
 # Define the path for storing face encodings
 DEFAULT_ENCODINGS_PATH = Path("output/encodings.pkl")
@@ -147,20 +151,94 @@ def process_image(image_path):
     return None
 
 
-def find_non_front_facing_images(folder_path):
-    image_paths = list(Path(folder_path).glob("*.jpg"))
+def get_face_detections_dnn(image_path, prototxt, caffemodel):
+    try:
+        net = cv2.dnn.readNetFromCaffe(prototxt, caffemodel)
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ValueError(f"Unable to load image at path: {image_path}")
 
-    with Pool() as pool:
-        results = pool.map(process_image, image_paths)
+        (h, w) = image.shape[:2]
+        blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+        net.setInput(blob)
+        detections = net.forward()
 
-    non_front_facing = [result for result in results if result is not None]
-    return non_front_facing
+        face_regions = []
+        for i in range(0, detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.5:
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                face_regions.append(box.astype("int").tolist())
+        return image_path, face_regions
+
+    except Exception as e:
+        print(f"Error processing image {image_path}: {e}")
+        return image_path, []
 
 
-# Usage
-folder = "path/to/your/folder"  # Replace with your folder path
-non_front_facing_images = find_non_front_facing_images(folder)
-print("Non front-facing images:", non_front_facing_images)
+def encode_faces(image_path, face_regions):
+    image = face_recognition.load_image_file(image_path)
+    encodings = []
+    for x1, y1, x2, y2 in face_regions:
+        face_image = image[y1:y2, x1:x2]
+        face_encodings = face_recognition.face_encodings(face_image)
+        if face_encodings:
+            encodings.append(face_encodings[0])
+    return image_path, encodings
+
+
+def find_duplicates(face_encodings, threshold=0.4):
+    duplicates = []
+    for path1, encodings1 in face_encodings.items():
+        for path2, encodings2 in face_encodings.items():
+            if path1 != path2:
+                for encoding1 in encodings1:
+                    for encoding2 in encodings2:
+                        distance = face_recognition.face_distance([encoding1], encoding2)
+                        if distance < threshold:
+                            duplicates.append((path1, path2))
+    return duplicates
+
+
+def process_folder_parallel(folder_path, prototxt, caffemodel):
+    start_time = time.time()
+    image_paths = list(Path(folder_path).glob("*.jpg")) + list(Path(folder_path).glob("*.png"))
+
+    face_data = {}  # Store face encodings for each image
+    images_without_faces_count = 0  # Counter for images without faces
+
+    with Pool(cpu_count()) as pool:
+        # Get face regions
+        face_regions_results = pool.starmap(
+            get_face_detections_dnn, [(str(image_path), prototxt, caffemodel) for image_path in image_paths]
+        )
+
+        # Get face encodings and count images without faces
+        for image_path, regions in face_regions_results:
+            if regions:  # Proceed only if faces are detected
+                _, encodings = encode_faces(image_path, regions)
+                face_data[image_path] = encodings
+            else:
+                images_without_faces_count += 1  # Increment counter if no faces are detected
+
+    # Find duplicates
+    duplicates = find_duplicates(face_data, threshold=0.3)
+
+    end_time = time.time()
+    return len(duplicates), images_without_faces_count, end_time - start_time
+
+
+# Specify the correct paths to your .prototxt and .caffemodel files
+prototxt = "deploy.prototxt"
+caffemodel = "res10_300x300_ssd_iter_140000.caffemodel"
+
+# Process the folders
+folders = ["test 100", "test 1000", "test 5000", "test 13000"]
+for folder in folders:
+    duplicate_count, no_face_count, duration = process_folder_parallel(folder, prototxt, caffemodel)
+    print(
+        f"Folder {folder}: Found {duplicate_count} potential duplicates and {no_face_count} images without faces in {duration:.2f} seconds"
+    )
 
 
 if __name__ == "__main__":
